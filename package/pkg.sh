@@ -12,7 +12,7 @@ rm -f "$OUT_MAC/steam_p2p_for_mc"
 rm -f "$OUT_MAC/steam_p2p_for_mc.*"
 rm -f "$OUT_WIN/steam_p2p_for_mc.*"
 
-# rm -rf "$OUT_ZIP/*"
+rm -rf "$OUT_ZIP/"
 
 echo "🚀 Packing for Linux..."
 cd ..
@@ -33,6 +33,7 @@ zip -r linux.zip "$OUT_LINUX"/*
 zip -r mac.zip "$OUT_MAC"/*
 zip -r win.zip "$OUT_WIN"/*
 
+mkdir -p "$OUT_ZIP"
 mv linux.zip "$OUT_ZIP" &&
 mv mac.zip "$OUT_ZIP" &&
 mv win.zip "$OUT_ZIP"

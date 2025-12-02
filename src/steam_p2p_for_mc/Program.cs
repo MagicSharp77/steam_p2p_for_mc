@@ -35,29 +35,11 @@ namespace steam_p2p_for_mc
             // --- 3. 初始化 ImGui ---
             _controller = new ImGuiRenderer(_gd, _gd.MainSwapchain.Framebuffer.OutputDescription, _window.Width, _window.Height);
             
+            // 👇👇👇 修正后的字体加载逻辑 👇👇👇
             try 
             {
                 var io = ImGui.GetIO(); // 先获取 io 对象
 
-                io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
-
-                // 2. 针对 Mac 的特殊适配 (Mac用户习惯用 Command+V 粘贴)
-                if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX))
-                {
-                    io.ConfigMacOSXBehaviors = true; // 开启 Mac 风格的文本编辑快捷键
-                }
-
-                // 3. 【核心】对接系统剪贴板 (解决无法粘贴问题)
-                // ImGui 不知道怎么访问系统剪贴板，我们要用 SDL2 的能力教它
-                io.SetClipboardTextFn = (IntPtr userData, string text) => 
-                {
-                    try { _window.ClipboardString = text; } catch {} // 处理设置剪贴板
-                };
-                io.GetClipboardTextFn = (IntPtr userData) => 
-                {
-                    try { return (IntPtr)System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(_window.ClipboardString); } 
-                    catch { return IntPtr.Zero; } // 处理读取剪贴板
-                };
                 // 1. 定义字体路径 (优先用 Noto，如果没有则降级)
                 string fontPath = "NotoSansCJK-Bold.ttc";
                 Console.WriteLine($"正在尝试加载字体: {fontPath}"); // 打印出来看看路径对不对
