@@ -12,6 +12,8 @@
     <PackageReference Include="Steamworks.NET" Version="2024.8.0" />
     <PackageReference Include="Veldrid.ImGui" Version="5.72.0" />
     <PackageReference Include="Veldrid.StartupUtilities" Version="4.9.0" />
+    <None Update="font.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
-
 </Project>

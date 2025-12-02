@@ -26,60 +26,83 @@ namespace steam_p2p_for_mc
             // --- 1. 初始化 Steam ---
             SteamSession.Instance.Init();
 
-            // --- 2. 创建窗口 (Veldrid) ---
+            // --- 2. 创建窗口 ---
             VeldridStartup.CreateWindowAndGraphicsDevice(
                 new WindowCreateInfo(50, 50, 800, 600, WindowState.Normal, "My Steam Tunnel (Linux/Win)"),
                 out _window,
                 out _gd);
 
-            // --- 3. 初始化 ImGui 渲染器 ---
-            // 注意：这里需要 Veldrid.ImGui 包。如果你报错找不到 ImGuiRenderer，
-            // 确保执行了: dotnet add package Veldrid.ImGui
+            // --- 3. 初始化 ImGui ---
             _controller = new ImGuiRenderer(_gd, _gd.MainSwapchain.Framebuffer.OutputDescription, _window.Width, _window.Height);
+            
             try 
             {
-                var io = ImGui.GetIO();
-                // 注意：有些版本的 ImGui 加载 TTC 需要指定 index (第三个参数不是 null 而是配置)
-                // 但通常改个扩展名 ImGui 也能认。如果崩了，换一个纯 .ttf 的字体文件（比如 wqy-microhei）最稳。
-                io.Fonts.AddFontFromFileTTF("font.ttf", 20.0f, null, io.Fonts.GetGlyphRangesChineseFull());
-                // 这一步很重要：告诉控制器字体变了，需要重建字体纹理
-                _controller.RecreateFontDeviceTexture(); 
+                var io = ImGui.GetIO(); // 先获取 io 对象
+
+                io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
+
+                // 2. 针对 Mac 的特殊适配 (Mac用户习惯用 Command+V 粘贴)
+                if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX))
+                {
+                    io.ConfigMacOSXBehaviors = true; // 开启 Mac 风格的文本编辑快捷键
+                }
+
+                // 3. 【核心】对接系统剪贴板 (解决无法粘贴问题)
+                // ImGui 不知道怎么访问系统剪贴板，我们要用 SDL2 的能力教它
+                io.SetClipboardTextFn = (IntPtr userData, string text) => 
+                {
+                    try { _window.ClipboardString = text; } catch {} // 处理设置剪贴板
+                };
+                io.GetClipboardTextFn = (IntPtr userData) => 
+                {
+                    try { return (IntPtr)System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(_window.ClipboardString); } 
+                    catch { return IntPtr.Zero; } // 处理读取剪贴板
+                };
+                // 1. 定义字体路径 (优先用 Noto，如果没有则降级)
+                string fontPath = "NotoSansCJK-Bold.ttc";
+                Console.WriteLine($"正在尝试加载字体: {fontPath}"); // 打印出来看看路径对不对
+                if (System.IO.File.Exists(fontPath))
+                {
+                    io.Fonts.Clear();
+                    io.Fonts.AddFontFromFileTTF(fontPath, 20.0f, null, io.Fonts.GetGlyphRangesChineseSimplifiedCommon());
+                    _controller.RecreateFontDeviceTexture(_gd); 
+                    Console.WriteLine("✅ 中文字体加载成功！");
+                }
+                else
+                {
+                    Console.WriteLine("❌ 找不到任何中文字体文件，将显示乱码。");
+                }
             }
             catch (Exception e) 
             {
-                Console.WriteLine("字体加载失败，将使用默认字体: " + e.Message);
+                Console.WriteLine("💥 字体加载炸了: " + e.Message);
             }
+            // 👆👆👆 修正结束 👆👆👆
+
             _cl = _gd.ResourceFactory.CreateCommandList();
 
-            // --- 4. 主循环 (Game Loop) ---
             while (_window.Exists)
             {
                 InputSnapshot snapshot = _window.PumpEvents();
                 if (!_window.Exists) break;
 
-                // A. 更新 Steam 回调 (非常重要，不写这个没法联网)
                 SteamSession.Instance.RunCallbacks();
+                
+                // 暂时注释掉 Tunnel 直到你创建了那个类
+                // Tunnel.Instance.Update(); 
 
-                // TODO: 这里将来调用 Tunnel.Update()
-                Tunnel.Instance.Update();
-
-                // B. 更新 UI
-                _controller.Update(1f / 60f, snapshot); // 假定 60fps
-
-                // C. 绘制你的界面
+                _controller.Update(1f / 60f, snapshot); 
                 SubmitUI();
 
-                // D. 渲染上屏
                 _cl.Begin();
                 _cl.SetFramebuffer(_gd.MainSwapchain.Framebuffer);
-                _cl.ClearColorTarget(0, RgbaFloat.Black); // 背景设为黑色
+                _cl.ClearColorTarget(0, RgbaFloat.Black);
                 _controller.Render(_gd, _cl);
                 _cl.End();
                 _gd.SubmitCommands(_cl);
                 _gd.SwapBuffers();
             }
 
-            // --- 5. 清理资源 ---
             _controller.Dispose();
             _cl.Dispose();
             _gd.Dispose();
@@ -115,7 +138,6 @@ namespace steam_p2p_for_mc
             {
                 if (ImGui.BeginTabItem("I am Host"))
                 {
-                    ImGui.TextColored(new Vector4(0, 1, 0, 1), $"Steam Status: Online");
                     ImGui.Text("Host a local Minecraft server to Steam friends.");
                     ImGui.InputInt("Local Port (MC Port)", ref _localPort);
                     
