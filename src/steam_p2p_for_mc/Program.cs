@@ -2,8 +2,9 @@
 using Veldrid;
 using Veldrid.Sdl2;
 using Veldrid.StartupUtilities;
-using System.Numerics; // 用于 Vector3/Vector2
+using System.Numerics;
 using Steamworks;
+using System.Runtime.InteropServices;
 
 namespace steam_p2p_for_mc
 {
@@ -12,66 +13,125 @@ namespace steam_p2p_for_mc
         private static Sdl2Window? _window;
         private static GraphicsDevice? _gd;
         private static CommandList? _cl;
-        private static ImGuiRenderer? _controller; // Veldrid.ImGui 提供的渲染器
+        private static ImGuiRenderer? _controller;
 
-        // UI 状态变量 (Vue 里的 data)
+        // 剪贴板委托
+        private delegate void SetClipboardTextFn(IntPtr userData, string text);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate IntPtr GetClipboardTextFn(IntPtr userData);
+
+        private static SetClipboardTextFn? _setClipboardDelegate;
+        private static GetClipboardTextFn? _getClipboardDelegate;
+
+        // UI 变量
         private static string _targetSteamID = ""; 
         private static int _localPort = 25565;
-        private static string _statusMessage = ""; // 用来存提示文字
-        private static Vector4 _statusColor = new Vector4(1, 1, 1, 1); // 文字颜色 (默认白)
-        private static bool _isConnected = false;  // 是否已连接
+        private static string _statusMessage = "";
+        private static Vector4 _statusColor = new Vector4(1, 1, 1, 1);
+        private static bool _isConnected = false;
+        
+        // 👇👇👇 1. 新增：记录 Steam 是否初始化成功 👇👇👇
+        private static bool _isSteamInitialized = false; 
 
         static void Main(string[] args)
         {
             // --- 1. 初始化 Steam ---
-            SteamSession.Instance.Init();
+            try {
+                // 👇👇👇 2. 修改：获取 Init 的返回值 👇👇👇
+                _isSteamInitialized = SteamAPI.Init();
+                if (!_isSteamInitialized) 
+                {
+                    Console.WriteLine("SteamAPI.Init failed! (Is Steam running?)");
+                }
+            } catch (Exception ex) { 
+                Console.WriteLine("Steam Init Error: " + ex.Message); 
+            }
 
             // --- 2. 创建窗口 ---
             VeldridStartup.CreateWindowAndGraphicsDevice(
-                new WindowCreateInfo(50, 50, 800, 600, WindowState.Normal, "My Steam Tunnel (Linux/Win)"),
+                new WindowCreateInfo(50, 50, 800, 600, WindowState.Normal, "My Steam Tunnel"),
                 out _window,
                 out _gd);
 
-            // --- 3. 初始化 ImGui ---
+            // --- 3. 初始化 ImGui 渲染器 ---
             _controller = new ImGuiRenderer(_gd, _gd.MainSwapchain.Framebuffer.OutputDescription, _window.Width, _window.Height);
             
-            // 👇👇👇 修正后的字体加载逻辑 👇👇👇
+            // --- 初始化配置 (只运行一次) ---
             try 
             {
-                var io = ImGui.GetIO(); // 先获取 io 对象
+                var io = ImGui.GetIO();
+                
+                // 键位映射
+                io.KeyMap[(int)ImGuiKey.Backspace] = (int)Key.BackSpace;
+                io.KeyMap[(int)ImGuiKey.Enter] = (int)Key.Enter;
+                io.KeyMap[(int)ImGuiKey.Delete] = (int)Key.Delete;
+                io.KeyMap[(int)ImGuiKey.LeftArrow] = (int)Key.Left;
+                io.KeyMap[(int)ImGuiKey.RightArrow] = (int)Key.Right;
+                io.KeyMap[(int)ImGuiKey.Home] = (int)Key.Home;
+                io.KeyMap[(int)ImGuiKey.End] = (int)Key.End;
+                io.KeyMap[(int)ImGuiKey.UpArrow] = (int)Key.Up;
+                io.KeyMap[(int)ImGuiKey.DownArrow] = (int)Key.Down;
+                io.KeyMap[(int)ImGuiKey.Tab] = (int)Key.Tab;
+                io.KeyMap[(int)ImGuiKey.Escape] = (int)Key.Escape;
+                io.KeyMap[(int)ImGuiKey.Space] = (int)Key.Space;
+                io.KeyMap[(int)ImGuiKey.A] = (int)Key.A;
+                io.KeyMap[(int)ImGuiKey.C] = (int)Key.C;
+                io.KeyMap[(int)ImGuiKey.V] = (int)Key.V;
+                io.KeyMap[(int)ImGuiKey.X] = (int)Key.X;
+                io.KeyMap[(int)ImGuiKey.Y] = (int)Key.Y;
+                io.KeyMap[(int)ImGuiKey.Z] = (int)Key.Z;
 
-                // 1. 定义字体路径 (优先用 Noto，如果没有则降级)
+                io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
+
+                // 暂时禁用剪贴板
+                _setClipboardDelegate = (userData, text) => { };
+                _getClipboardDelegate = (userData) => { return IntPtr.Zero; };
+                io.SetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(_setClipboardDelegate);
+                io.GetClipboardTextFn = Marshal.GetFunctionPointerForDelegate(_getClipboardDelegate);
+
+                // 字体加载
                 string fontPath = "NotoSansCJK-Bold.ttc";
-                Console.WriteLine($"正在尝试加载字体: {fontPath}"); // 打印出来看看路径对不对
                 if (System.IO.File.Exists(fontPath))
                 {
                     io.Fonts.Clear();
                     io.Fonts.AddFontFromFileTTF(fontPath, 20.0f, null, io.Fonts.GetGlyphRangesChineseSimplifiedCommon());
                     _controller.RecreateFontDeviceTexture(_gd); 
-                    Console.WriteLine("✅ 中文字体加载成功！");
-                }
-                else
-                {
-                    Console.WriteLine("❌ 找不到任何中文字体文件，将显示乱码。");
+                    Console.WriteLine("✅ 字体加载成功");
                 }
             }
             catch (Exception e) 
             {
-                Console.WriteLine("💥 字体加载炸了: " + e.Message);
+                Console.WriteLine("配置异常: " + e.Message);
             }
-            // 👆👆👆 修正结束 👆👆👆
 
             _cl = _gd.ResourceFactory.CreateCommandList();
 
+            // --- 主循环 ---
             while (_window.Exists)
             {
-                InputSnapshot snapshot = _window.PumpEvents();
+                InputSnapshot snapshot = _window.PumpEvents(); 
                 if (!_window.Exists) break;
 
-                SteamSession.Instance.RunCallbacks();
-                
-                // 暂时注释掉 Tunnel 直到你创建了那个类
-                // Tunnel.Instance.Update(); 
+                // 必须每帧调用，处理 Steam 回调
+                if (_isSteamInitialized) {
+                    SteamAPI.RunCallbacks();
+                }
+
+                Tunnel.Instance.Update(); // 待开启
+
+                // 处理输入
+                var io = ImGui.GetIO();
+                foreach (var keyEvent in snapshot.KeyEvents)
+                {
+                    io.KeysDown[(int)keyEvent.Key] = keyEvent.Down;
+                    if (keyEvent.Key == Key.ShiftLeft || keyEvent.Key == Key.ShiftRight) io.KeyShift = keyEvent.Down;
+                    if (keyEvent.Key == Key.ControlLeft || keyEvent.Key == Key.ControlRight) io.KeyCtrl = keyEvent.Down;
+                    if (keyEvent.Key == Key.AltLeft || keyEvent.Key == Key.AltRight) io.KeyAlt = keyEvent.Down;
+                }
+                foreach (var ch in snapshot.KeyCharPresses)
+                {
+                    io.AddInputCharacter(ch);
+                }
 
                 _controller.Update(1f / 60f, snapshot); 
                 SubmitUI();
@@ -85,108 +145,75 @@ namespace steam_p2p_for_mc
                 _gd.SwapBuffers();
             }
 
-            _controller.Dispose();
+            // 清理资源
+            _controller?.Dispose();
             _cl.Dispose();
             _gd.Dispose();
-            SteamSession.Instance.Shutdown();
+            
+            if (_isSteamInitialized) {
+                SteamAPI.Shutdown();
+            }
         }
 
-        // --- 你的前端代码主要写在这里 ---
         private static void SubmitUI()
         {
-            // 设置整个窗口填满
             ImGui.SetNextWindowPos(Vector2.Zero);
-            ImGui.SetNextWindowSize(new Vector2(_window.Width, _window.Height));
-            
-            // 开始绘制 ImGui 窗口
+            ImGui.SetNextWindowSize(new Vector2(_window!.Width, _window.Height)); // 加了感叹号消除警告
             ImGui.Begin("Main", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize);
 
-            // 显示用户信息
-            if (SteamSession.Instance.IsInitialized)
+            string name = "Wait Login...";
+            string steamId = "---";
+            
+            // 👇👇👇 3. 修改：使用我们自己的变量判断 👇👇👇
+            if (_isSteamInitialized) 
             {
-                ImGui.TextColored(new Vector4(0, 1, 0, 1), $"Steam Status: Online");
-                ImGui.Text($"User: {SteamSession.Instance.MyName}");
-                ImGui.Text($"ID: {SteamSession.Instance.MySteamID}");
+                try {
+                    name = SteamFriends.GetPersonaName();
+                    steamId = SteamUser.GetSteamID().ToString();
+                    ImGui.TextColored(new Vector4(0, 1, 0, 1), "Steam Status: Online");
+                } catch {
+                    ImGui.TextColored(new Vector4(1, 0, 0, 1), "Steam Error");
+                }
             }
             else
             {
-                ImGui.TextColored(new Vector4(1, 0, 0, 1), "Steam Status: Offline (Check steam_appid.txt)");
+                ImGui.TextColored(new Vector4(1, 0, 0, 1), "Steam Status: Offline");
             }
 
+            ImGui.Text($"User: {name}");
+            ImGui.Text($"ID: {steamId}");
             ImGui.Separator();
 
-            // 两个 Tab：主机模式 / 客户模式
             if (ImGui.BeginTabBar("ModeTabs"))
             {
                 if (ImGui.BeginTabItem("I am Host"))
                 {
-                    ImGui.Text("Host a local Minecraft server to Steam friends.");
-                    ImGui.InputInt("Local Port (MC Port)", ref _localPort);
-                    
+                    ImGui.InputInt("Local Port", ref _localPort);
                     if (ImGui.Button("Start Hosting"))
                     {
-                        Console.WriteLine($"Starting Host on port {_localPort}...");
-                        // TODO: 这里将来调用 Tunnel.StartHost(_localPort)
-                        // 停止旧的（如果有）
-                        Tunnel.Instance.Stop();
-                        // 启动新的
-                        Tunnel.Instance.StartHost(_localPort);
-                        // 更新状态信息
-                        _statusMessage = Tunnel.Instance.StatusInfo;
+                         Tunnel.Instance.StartHost(_localPort);
+                         _statusMessage = $"Starting Host on {_localPort}...";
                     }
-                    ImGui.TextColored(new Vector4(1, 1, 0, 1), Tunnel.Instance.StatusInfo);
+                    ImGui.TextColored(_statusColor, _statusMessage);
                     ImGui.EndTabItem();
                 }
 
                 if (ImGui.BeginTabItem("I am Client"))
                 {
-                    ImGui.Text("Connect to a friend's Steam Tunnel.");
                     ImGui.InputText("Friend's SteamID", ref _targetSteamID, 100);
                     if (ImGui.Button("Connect"))
                     {
-                        if (string.IsNullOrEmpty(_targetSteamID))
+                        if (ulong.TryParse(_targetSteamID, out ulong id))
                         {
-                            _statusMessage = "❌SteamID!";
-                            _statusColor = new Vector4(1, 0, 0, 1); // 红色
-                        }
-                        else
-                        {
-                            _statusMessage = "⏳ try to Connect...";
-                            _statusColor = new Vector4(1, 1, 0, 1); // 黄色
-
-                            ulong id;
-                            // 尝试把字符串解析成 ulong，再转成 CSteamID
-                            if (ulong.TryParse(_targetSteamID, out id))
-                            {
-                                Tunnel.Instance.Stop();
-                                // 这里我们固定让客户端监听本地 25565，方便玩家直连
-                                Tunnel.Instance.StartClient(new CSteamID(id), 25565);
-                                _statusMessage = "⏳ starting listener...";
-                                _isConnected = true;
-                                _statusMessage = $"✅ connected!\nplease connect MC : 127.0.0.1:25565";
-                                _statusColor = new Vector4(0, 1, 0, 1); // 绿色
-                            }
-                            else
-                            {
-                                _statusMessage = "❌ SteamID 格式不对！应该是纯数字";
-                            }
+                            Tunnel.Instance.StartClient(new CSteamID(id), 25565);
+                            _statusMessage = $"Connecting to {id}...";
                         }
                     }
-                    ImGui.TextColored(new Vector4(0, 1, 0, 1), Tunnel.Instance.StatusInfo);
-                    if (Tunnel.Instance.IsRunning)
-                    {
-                        ImGui.Text("please connect MC : 127.0.0.1:yourOpenPort");
-                        if (ImGui.Button("copy address"))
-                        {
-                            ImGui.SetClipboardText("127.0.0.1:yourOpenPort");
-                        }
-                    }
+                    ImGui.TextColored(_statusColor, _statusMessage);
                     ImGui.EndTabItem();
                 }
-
                 ImGui.EndTabBar();
             }
-
             ImGui.End();
         }
     }
