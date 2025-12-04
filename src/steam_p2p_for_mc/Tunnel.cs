@@ -6,49 +6,61 @@ namespace steam_p2p_for_mc
 {
     public class Tunnel
     {
-        // 单例模式 (方便全局调用)
+        // 单例模式
         private static Tunnel? _instance;
         public static Tunnel Instance => _instance ??= new Tunnel();
 
         // 状态变量
         public bool IsRunning { get; private set; } = false;
-        public string StatusInfo { get; private set; } = "就绪";
+        public string StatusInfo { get; private set; } = "Ready";
         
         // 网络相关变量
-        private TcpListener? _tcpListener; // 客户端用：监听本地 MC
+        private TcpListener? _tcpListener; // 客户端模式：监听本地端口等待 MC 连接
         private TcpClient? _tcpClient;     // 通用：维持 TCP 连接
         private NetworkStream? _tcpStream; // 通用：TCP 数据流
-        private CSteamID _remoteSteamID;   // 对方的 Steam ID
+        private CSteamID _remoteSteamID = CSteamID.Nil;   // 对方的 Steam ID
         
-        // 缓冲区 (4KB)
+        // 缓冲区
         private byte[] _buffer = new byte[4096];
 
+        // 回调：用来自动接受连接请求
+        private Callback<P2PSessionRequest_t>? _p2pSessionRequestCallback;
+
+        private Tunnel() 
+        {
+            // 注册 Steam P2P 连接请求回调
+            // 当有人试图连接你时，Steam 会触发这个，我们需要说 "Accept"
+            _p2pSessionRequestCallback = Callback<P2PSessionRequest_t>.Create(OnP2PSessionRequest);
+        }
+
         // --- 房主模式 (Host) ---
-        // 连接本地 Minecraft 服务器 -> 等待 Steam 上的基友发数据过来
         public void StartHost(int localMcPort)
         {
+            Stop(); // 先重置
             try
             {
                 // 1. 尝试连接本地的 MC 服务器
+                // 注意：你必须先启动 Minecraft 服务器，再点这个按钮，否则会报错
                 _tcpClient = new TcpClient();
                 _tcpClient.Connect("127.0.0.1", localMcPort);
                 _tcpStream = _tcpClient.GetStream();
 
                 IsRunning = true;
-                StatusInfo = $"[房主] 已连接本地 MC 端口 {localMcPort}，等待基友连接...";
+                _remoteSteamID = CSteamID.Nil; // 等待有人连进来
+                StatusInfo = $"[HOST] Connected to MC Local ({localMcPort}). Waiting for Client...";
                 Console.WriteLine(StatusInfo);
             }
             catch (Exception e)
             {
-                StatusInfo = $"❌ 无法连接本地 MC: {e.Message}";
+                StatusInfo = $"❌ MC Connection Failed: {e.Message}";
                 IsRunning = false;
             }
         }
 
-        // --- 加入者模式 (Client) ---
-        // 开启本地端口 -> 等待自己打开 MC 连接 -> 把数据发给 Steam 上的房主
+        // --- 客户端模式 (Client) ---
         public void StartClient(CSteamID hostSteamID, int localListenPort = 25565)
         {
+            Stop(); // 先重置
             _remoteSteamID = hostSteamID;
             try
             {
@@ -57,63 +69,66 @@ namespace steam_p2p_for_mc
                 _tcpListener.Start();
                 
                 IsRunning = true;
-                StatusInfo = $"[客户端] 正在监听 127.0.0.1:{localListenPort}，请打开 MC 连接此地址！";
+                StatusInfo = $"[CLIENT] Listening on 127.0.0.1:{localListenPort}. Connect via MC!";
                 Console.WriteLine(StatusInfo);
-
-                // 注意：这里我们还没真正建立 TCP 连接，要等 Update 里 Accept
             }
             catch (Exception e)
             {
-                StatusInfo = $"❌ 端口监听失败: {e.Message}";
+                StatusInfo = $"❌ Port Listen Failed: {e.Message}";
                 IsRunning = false;
             }
         }
 
-        // --- 核心循环 (每帧调用) ---
-        // 这就是“泵”，负责把水(数据)从一头搬到另一头
+        // --- 核心循环 (需在 Program.cs 每帧调用) ---
         public void Update()
         {
+            // 如果没运行，就不处理
             if (!IsRunning) return;
 
             // =========================================================
-            //  A. 处理 TCP 连接建立 (仅限客户端模式)
+            //  A. 客户端模式：处理 MC 游戏的连接
             // =========================================================
             if (_tcpListener != null && _tcpListener.Pending())
             {
-                // MC 游戏刚刚连上来了！
-                _tcpClient = _tcpListener.AcceptTcpClient();
-                _tcpStream = _tcpClient.GetStream();
-                StatusInfo = "✅ Minecraft 已连接！隧道打通！";
-                
-                // 第一次握手：主动给房主发个空包，打通 P2P 链路
-                byte[] hello = new byte[1] { 0 };
-                SteamNetworking.SendP2PPacket(_remoteSteamID, hello, 1, EP2PSend.k_EP2PSendReliable);
+                try 
+                {
+                    _tcpClient = _tcpListener.AcceptTcpClient();
+                    _tcpStream = _tcpClient.GetStream();
+                    StatusInfo = "✅ Minecraft Connected! Tunnel Active.";
+                    
+                    // 第一次握手：主动给房主发个空包，打通 P2P 链路
+                    byte[] hello = new byte[1] { 0 };
+                    SteamNetworking.SendP2PPacket(_remoteSteamID, hello, 1, EP2PSend.k_EP2PSendReliable);
+                    Console.WriteLine("Sent Handshake to Host.");
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine("Accept Client Error: " + e.Message);
+                }
             }
 
             // =========================================================
-            //  B. 从 Steam 收信 -> 发给 TCP (MC)
+            //  B. 读取 Steam 发来的数据 -> 写入 TCP
             // =========================================================
             uint msgSize;
-            // 循环读取所有积压的 Steam 包
             while (SteamNetworking.IsP2PPacketAvailable(out msgSize))
             {
                 byte[] p2pBuffer = new byte[msgSize];
                 uint bytesRead;
                 CSteamID senderId;
                 
-                // 读包
                 if (SteamNetworking.ReadP2PPacket(p2pBuffer, msgSize, out bytesRead, out senderId))
                 {
-                    // 如果我是房主，我要记下来谁在连我，以后发数据就发给他
+                    // 如果我是房主，且还不知道谁在连我，就认定第一个发包的人是基友
                     if (_tcpListener == null && _remoteSteamID == CSteamID.Nil)
                     {
                         _remoteSteamID = senderId;
-                        StatusInfo = $"✅ 基友 ({senderId}) 已连接！隧道打通！";
-                        // 自动回传一个握手包，确保双向打通
+                        StatusInfo = $"✅ Friend ({senderId}) Connected!";
+                        // 强制接受会话
                         SteamNetworking.AcceptP2PSessionWithUser(senderId);
                     }
 
-                    // 把数据写入 TCP (只要 TCP 连着)
+                    // 写入 TCP (只要 TCP 连着)
                     if (_tcpStream != null && _tcpStream.CanWrite)
                     {
                         _tcpStream.Write(p2pBuffer, 0, (int)bytesRead);
@@ -122,37 +137,57 @@ namespace steam_p2p_for_mc
             }
 
             // =========================================================
-            //  C. 从 TCP (MC) 收信 -> 发给 Steam
+            //  C. 读取 TCP 数据 -> 发给 Steam
             // =========================================================
-            // 检查 TCP 有没有新数据发过来
-            if (_tcpStream != null && _tcpStream.DataAvailable)
+            try 
             {
-                // 从 TCP 读出来
-                int len = _tcpStream.Read(_buffer, 0, _buffer.Length);
-                if (len > 0)
+                if (_tcpStream != null && _tcpStream.DataAvailable)
                 {
-                    // 塞进 Steam P2P 发出去
-                    // k_EP2PSendReliable = 像 TCP 一样可靠传输 (重要！)
-                    if (_remoteSteamID != CSteamID.Nil)
+                    int len = _tcpStream.Read(_buffer, 0, _buffer.Length);
+                    if (len > 0 && _remoteSteamID != CSteamID.Nil)
                     {
+                        // 发送给对方
                         SteamNetworking.SendP2PPacket(_remoteSteamID, _buffer, (uint)len, EP2PSend.k_EP2PSendReliable);
                     }
                 }
             }
+            catch (Exception e)
+            {
+                StatusInfo = "TCP Error: " + e.Message;
+                Stop();
+            }
         }
 
-        // 停止并清理
+        // --- 自动接受连接回调 ---
+        private void OnP2PSessionRequest(P2PSessionRequest_t pCallback)
+        {
+            CSteamID remoteID = pCallback.m_steamIDRemote;
+            Console.WriteLine($"[Steam] Incoming P2P request from: {remoteID}");
+
+            // 出于安全考虑，你也可以在这里检查 remoteID 是不是你的好友
+            // 这里为了方便，直接允许所有连接
+            SteamNetworking.AcceptP2PSessionWithUser(remoteID);
+        }
+
         public void Stop()
         {
             IsRunning = false;
+            
+            // 关闭连接
+            if (_remoteSteamID != CSteamID.Nil)
+            {
+                SteamNetworking.CloseP2PSessionWithUser(_remoteSteamID);
+            }
+
             _tcpListener?.Stop();
             _tcpClient?.Close();
             _tcpStream?.Close();
+            
             _tcpListener = null;
             _tcpClient = null;
             _tcpStream = null;
             _remoteSteamID = CSteamID.Nil;
-            StatusInfo = "已停止";
+            StatusInfo = "Stopped";
         }
     }
 }
